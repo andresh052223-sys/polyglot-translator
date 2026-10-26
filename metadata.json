@@ -1,0 +1,6 @@
+{
+  "name": "Polyglot Color Translator",
+  "description": "AI-Powered Multilingual Translator with Color-Coded Grammar and Audio Pronunciation across 7 languages.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
