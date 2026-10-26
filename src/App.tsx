@@ -169,10 +169,23 @@ export default function App() {
         }),
       });
 
-      const data = await response.json();
+      const contentType = response.headers.get('content-type') || '';
+      let data: any = null;
+
+      if (contentType.includes('application/json')) {
+        data = await response.json();
+      } else {
+        const textBody = await response.text();
+        console.warn('Non-JSON response received from /api/translate:', response.status, textBody.slice(0, 100));
+        throw new Error(
+          response.status === 504 || response.status === 503
+            ? 'El servicio de IA está experimentando alta demanda o tardó en responder. Por favor reintenta en unos instantes o selecciona uno de los casos de prueba lingüísticos.'
+            : `El servidor no pudo procesar la traducción (código ${response.status}).`
+        );
+      }
 
       if (!response.ok) {
-        throw new Error(data.error || 'Error al traducir la frase.');
+        throw new Error(data?.error || `Error al traducir la frase (${response.status}).`);
       }
 
       if (data.results && Array.isArray(data.results)) {
@@ -199,13 +212,23 @@ export default function App() {
     } catch (err: any) {
       console.error('Translation execution error:', err);
 
-      // Check if it matches a canonical example locally as a resilient fallback
+      // Resilient local match for canonical examples with full normalization
+      const cleanNorm = (str: string) =>
+        str
+          .toLowerCase()
+          .trim()
+          .replace(/[¿?¡!.,;:«»"'()[\]{}。、！？]/g, '')
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .replace(/\s+/g, ' ');
+
+      const normText = cleanNorm(textToTranslate);
+
       const localMatch = CANONICAL_EXAMPLES.find((ex) => {
-        const textLower = textToTranslate.toLowerCase();
-        if (ex.spanish.toLowerCase() === textLower || ex.englishPrompt.toLowerCase() === textLower) {
+        if (cleanNorm(ex.spanish) === normText || cleanNorm(ex.englishPrompt) === normText) {
           return true;
         }
-        return ex.results.some((r) => r.fullTranslation.toLowerCase() === textLower);
+        return ex.results.some((r) => cleanNorm(r.fullTranslation) === normText);
       });
 
       if (localMatch) {

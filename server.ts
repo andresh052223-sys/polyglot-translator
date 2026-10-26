@@ -1,10 +1,18 @@
 import express from 'express';
 import dotenv from 'dotenv';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
 import { CANONICAL_EXAMPLES, getCanonicalResults } from './src/data/canonicalExamples';
-import { LanguageResult, SUPPORTED_LANGUAGES, SupportedLanguageKey } from './src/types/translator';
+import {
+  LanguageResult,
+  SUPPORTED_LANGUAGES,
+  SupportedLanguageKey,
+  GRAMMAR_CATEGORIES,
+  GrammarCategory,
+  AnalyzedToken,
+} from './src/types/translator';
 
 dotenv.config();
 
@@ -126,7 +134,11 @@ Responde ÚNICAMENTE un JSON con este formato exacto:
   "confidence": "high" | "medium" | "low"
 }`;
 
-        const response: any = await ai.models.generateContent({
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Detect timeout')), 5000)
+        );
+
+        const generatePromise = ai.models.generateContent({
           model: 'gemini-3.1-flash-lite',
           contents: detectPrompt,
           config: {
@@ -134,6 +146,8 @@ Responde ÚNICAMENTE un JSON con este formato exacto:
             temperature: 0,
           },
         });
+
+        const response: any = await Promise.race([generatePromise, timeoutPromise]);
 
         const parsed = JSON.parse(response.text || '{}');
         if (parsed.detectedKey && parsed.detectedKey !== 'ambiguous') {
@@ -218,88 +232,61 @@ app.post('/api/translate', async (req, res) => {
     // 2. If Gemini API is available, generate translations to the exactly 7 other languages
     if (ai) {
       const targetLanguagesList = targetLanguages
-        .map(
-          (t, idx) =>
-            `${idx + 1}. ${t.name} (código: "${t.key}", BCP47: "${t.bcp47}", bandera: "${t.flag}"${
-              t.key === 'zh'
-                ? ', caracteres simplificados naturales, phoneticTranscription con Hanyu Pinyin y marcas tonales'
-                : t.key === 'ja'
-                ? ', kanji/hiragana/katakana natural, phoneticTranscription con Hepburn Rōmaji'
-                : ''
-            })`
-        )
+        .map((t) => `- ${t.name} (${t.key}, ${t.bcp47})`)
         .join('\n');
 
+      const VALID_CATEGORIES: GrammarCategory[] = [
+        'noun',
+        'pronoun',
+        'main_verb',
+        'auxiliary_verb',
+        'negation',
+        'preposition',
+        'adjective',
+        'adverb',
+        'article',
+        'other',
+      ];
+
       const prompt = `Actúa como lingüista computacional y traductor multilingüe experto.
-Recibirás una frase en ${sourceConfig.name} (${sourceConfig.key}): "${trimmedInput}".
+Frase de origen (${sourceConfig.name} - ${sourceConfig.key}): "${trimmedInput}"
 Tradúcela a exactamente estos 7 idiomas de destino:
 ${targetLanguagesList}
 
-Reglas estrictas de traducción y análisis gramatical:
-1. Traduce fielmente y naturalmente a cada uno de los 7 idiomas destino.
-2. NUNCA incluyas el idioma de origen (${sourceConfig.name}) entre los resultados de destino. Deben ser exactamente 7 idiomas de destino.
-3. Para cada idioma destino, segmenta las palabras u oraciones en tokens e identifica la categoría gramatical ("category") de cada uno en el contexto de su oración, usando estrictamente una de estas 10 categorías:
-   - "noun": Sustantivos (personas, cosas, lugares, entidades).
-   - "pronoun": Pronombres personales o relativos (I, she, you, they, él, ele). ATENCIÓN: Los determinantes posesivos que acompañan a un sustantivo ("my car", "mi casa", "mon frère", "mein Bruder") deben clasificarse como "other".
-   - "main_verb": Verbos principales que expresan la acción, estado o proceso nuclear.
-   - "auxiliary_verb": Verbos auxiliares (does, do, have, been, está, ont, haben, です, ます).
-   - "negation": Palabras y partículas de negación oracional (not, no, nicht, ne, pas, não, non, 不, ません).
-   - "preposition": Preposiciones (on, to, in, de, a, sur, nach, に, へ).
-   - "adjective": Adjetivos calificativos o descriptivos.
-   - "adverb": Adverbios de modo, grado, intensidad, frecuencia, tiempo.
-   - "article": Artículos definidos e indefinidos según cada idioma (the, a, un, o, a, il, le, der).
-   - "other": Otras palabras (posesivos que acompañan sustantivos, conjunciones, partículas japonesas は/が/を, partículas chinas 的/得/吗/了, etc.).
+Clasifica cada palabra o token en una de estas 10 categorías gramaticales:
+- "noun": sustantivos
+- "pronoun": pronombres personales o relativos (determinantes posesivos con nombre como my/mi son "other")
+- "main_verb": verbos principales de la acción o cópula
+- "auxiliary_verb": verbos auxiliares (does, have, está, desu, etc.)
+- "negation": negaciones (not, no, nicht, pas, etc.)
+- "preposition": preposiciones (on, in, de, to, etc.)
+- "adjective": adjetivos
+- "adverb": adverbios
+- "article": artículos (the, a, il, der, etc.)
+- "other": otras palabras (posesivos que acompañan sustantivos, conjunciones, partículas)
 
-4. Para cada token incluye:
-   - "id": string identificador único (ej: "${targetLanguages[0].key}-1")
-   - "text": la palabra o token
-   - "category": una de las 10 categorías exactas
-   - "categoryLabelEs": nombre en español de la categoría (ej: "Sustantivo", "Pronombre", "Verbo Principal", "Auxiliar", "Negación", "Preposición", "Adjetivo", "Adverbio", "Artículo", "Otra palabra")
-   - "meaningEs": significado o glosa concisa en español (1-3 palabras)
-   - "syntacticRole": función sintáctica contextual breve
-   - "spanishCorrespondence": correspondencia aproximada
-   - "pinyin": obligatorio solo para tokens en chino ("zh") con marcas tonales
-   - "romaji": obligatorio solo para tokens en japonés ("ja") en Hepburn
-
-5. En "phoneticTranscription":
-   - Solo debe generarse para Chino mandarín ("zh") con Hanyu Pinyin y tonos.
-   - Solo debe generarse para Japonés ("ja") con Hepburn Rōmaji.
-   - Para los demás idiomas debe ser null.
-
-Responde ÚNICAMENTE un objeto JSON válido con esta estructura:
+Estructura JSON compacta requerida:
 {
   "results": [
     {
-      "languageKey": "${targetLanguages[0].key}",
-      "languageName": "${targetLanguages[0].name}",
-      "flag": "${targetLanguages[0].flag}",
-      "bcp47": "${targetLanguages[0].bcp47}",
-      "fullTranslation": "...",
+      "languageKey": "en",
+      "fullTranslation": "translation",
       "phoneticTranscription": null,
-      "phoneticLabel": null,
       "tokens": [
-        {
-          "id": "${targetLanguages[0].key}-1",
-          "text": "word",
-          "category": "noun",
-          "categoryLabelEs": "Sustantivo",
-          "meaningEs": "significado",
-          "syntacticRole": "Sujeto",
-          "spanishCorrespondence": "palabra"
-        }
-      ],
-      "grammarNotes": "Nota gramatical breve opcional"
+        ["palabra", "categoria", "significado breve en español", "rol sintáctico", "pinyin_o_romaji_opcional"]
+      ]
     }
   ]
-}`;
+}
+Nota: "phoneticTranscription" solo para "zh" (Hanyu Pinyin con marcas tonales) y "ja" (Hepburn Rōmaji). Para los demás pon null.`;
 
-      const candidateModels = ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite'];
+      const candidateModels = ['gemini-3.1-flash-lite', 'gemini-3.8-flash', 'gemini-flash-latest'];
       let lastModelError: any = null;
 
       for (const modelName of candidateModels) {
         try {
           const timeoutPromise = new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('Timeout de consulta al modelo')), 45000)
+            setTimeout(() => reject(new Error('Timeout de consulta al modelo')), 18000)
           );
 
           const generatePromise = ai.models.generateContent({
@@ -308,9 +295,6 @@ Responde ÚNICAMENTE un objeto JSON válido con esta estructura:
             config: {
               responseMimeType: 'application/json',
               temperature: 0.1,
-              thinkingConfig: {
-                thinkingBudget: 0,
-              },
             },
           });
 
@@ -319,17 +303,82 @@ Responde ÚNICAMENTE un objeto JSON válido con esta estructura:
           const rawJson = response.text || '';
           const parsed = JSON.parse(rawJson);
           if (parsed.results && Array.isArray(parsed.results) && parsed.results.length >= 7) {
-            // Ensure proper phonetic labels for zh & ja
-            const formattedResults = parsed.results.map((r: LanguageResult) => {
-              if (r.languageKey === 'zh') {
-                r.phoneticLabel = 'Hanyu Pinyin con tonos';
-              } else if (r.languageKey === 'ja') {
-                r.phoneticLabel = 'Hepburn Rōmaji';
-              } else {
-                r.phoneticTranscription = undefined;
-                r.phoneticLabel = undefined;
-              }
-              return r;
+            const formattedResults: LanguageResult[] = targetLanguages.map((targetLang) => {
+              const item =
+                parsed.results.find((p: any) => p.languageKey === targetLang.key) ||
+                parsed.results[0];
+              const rawTokens = Array.isArray(item.tokens) ? item.tokens : [];
+
+              const tokens: AnalyzedToken[] = rawTokens.map((t: any, idx: number) => {
+                if (Array.isArray(t)) {
+                  const text = String(t[0] || '');
+                  const rawCat = String(t[1] || 'other').toLowerCase();
+                  const cat: GrammarCategory = (VALID_CATEGORIES.includes(rawCat as any)
+                    ? rawCat
+                    : 'other') as GrammarCategory;
+                  const meaning = String(t[2] || text);
+                  const role = String(t[3] || 'Elemento');
+                  const phonetic = t[4] ? String(t[4]) : undefined;
+                  return {
+                    id: `${targetLang.key}-${idx + 1}`,
+                    text,
+                    category: cat,
+                    categoryLabelEs: GRAMMAR_CATEGORIES[cat]?.nameEs || 'Otra palabra',
+                    meaningEs: meaning,
+                    syntacticRole: role,
+                    spanishCorrespondence: meaning,
+                    pinyin: targetLang.key === 'zh' ? phonetic : undefined,
+                    romaji: targetLang.key === 'ja' ? phonetic : undefined,
+                  };
+                } else if (typeof t === 'object' && t !== null) {
+                  const text = String(t.text || '');
+                  const rawCat = String(t.category || 'other').toLowerCase();
+                  const cat: GrammarCategory = (VALID_CATEGORIES.includes(rawCat as any)
+                    ? rawCat
+                    : 'other') as GrammarCategory;
+                  return {
+                    id: t.id || `${targetLang.key}-${idx + 1}`,
+                    text,
+                    category: cat,
+                    categoryLabelEs:
+                      t.categoryLabelEs || GRAMMAR_CATEGORIES[cat]?.nameEs || 'Otra palabra',
+                    meaningEs: t.meaningEs || text,
+                    syntacticRole: t.syntacticRole || 'Elemento',
+                    spanishCorrespondence: t.spanishCorrespondence || t.meaningEs || text,
+                    pinyin: targetLang.key === 'zh' ? t.pinyin || t.phonetic : undefined,
+                    romaji: targetLang.key === 'ja' ? t.romaji || t.phonetic : undefined,
+                  };
+                }
+                return {
+                  id: `${targetLang.key}-${idx + 1}`,
+                  text: String(t),
+                  category: 'other' as GrammarCategory,
+                  categoryLabelEs: 'Otra palabra',
+                  meaningEs: String(t),
+                  syntacticRole: 'Elemento',
+                  spanishCorrespondence: String(t),
+                };
+              });
+
+              return {
+                languageKey: targetLang.key,
+                languageName: targetLang.name,
+                flag: targetLang.flag,
+                bcp47: targetLang.bcp47,
+                fullTranslation: item.fullTranslation || '',
+                phoneticTranscription:
+                  targetLang.key === 'zh' || targetLang.key === 'ja'
+                    ? item.phoneticTranscription || undefined
+                    : undefined,
+                phoneticLabel:
+                  targetLang.key === 'zh'
+                    ? 'Hanyu Pinyin con tonos'
+                    : targetLang.key === 'ja'
+                    ? 'Hepburn Rōmaji'
+                    : undefined,
+                tokens,
+                grammarNotes: item.grammarNotes,
+              };
             });
 
             return res.json({
@@ -366,19 +415,20 @@ Responde ÚNICAMENTE un objeto JSON válido con esta estructura:
   }
 });
 
-// In development, hook up Vite middleware; in production, serve static files
-if (process.env.NODE_ENV !== 'production') {
+// In development (or if dist is not yet built), hook up Vite middleware; otherwise serve static files
+const distPath = path.resolve(__dirname, 'dist');
+if (process.env.NODE_ENV === 'production' && fs.existsSync(distPath)) {
+  app.use(express.static(distPath));
+  app.get('*', (req, res) => {
+    res.sendFile(path.resolve(distPath, 'index.html'));
+  });
+} else {
   const { createServer } = await import('vite');
   const vite = await createServer({
     server: { middlewareMode: true },
     appType: 'spa',
   });
   app.use(vite.middlewares);
-} else {
-  app.use(express.static(path.resolve(__dirname, 'dist')));
-  app.get('*', (req, res) => {
-    res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
-  });
 }
 
 app.listen(port, '0.0.0.0', () => {
