@@ -5,6 +5,7 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
 import { CANONICAL_EXAMPLES, getCanonicalResults } from './src/data/canonicalExamples';
+import { clientFallbackTranslate } from './src/services/clientFallbackTranslator';
 import {
   LanguageResult,
   SUPPORTED_LANGUAGES,
@@ -419,16 +420,38 @@ Nota: "phoneticTranscription" solo para "zh" (Hanyu Pinyin con marcas tonales) y
         }
       }
 
-      console.error('All Gemini model candidates failed:', lastModelError);
+      console.warn('All Gemini model candidates failed or quota reached, using linguistic translation engine.');
+      const fallbackResults = clientFallbackTranslate(trimmedInput, sourceConfig.key);
+      if (fallbackResults && fallbackResults.length > 0) {
+        return res.json({
+          success: true,
+          source: 'linguistic-engine',
+          sourceLanguage: sourceConfig.key,
+          originalText: trimmedInput,
+          results: fallbackResults,
+        });
+      }
+
       return res.status(503).json({
-        error: 'El servicio de IA tardó demasiado o no estuvo disponible temporalmente. Puedes reintentar o usar uno de los ejemplos preconfigurados.',
+        error: 'El servicio de IA tardó demasiado o no estuvo disponible temporalmente.',
         detail: lastModelError?.message || 'High demand spike',
+      });
+    }
+
+    const fallbackResults = clientFallbackTranslate(trimmedInput, sourceConfig.key);
+    if (fallbackResults && fallbackResults.length > 0) {
+      return res.json({
+        success: true,
+        source: 'linguistic-engine',
+        sourceLanguage: sourceConfig.key,
+        originalText: trimmedInput,
+        results: fallbackResults,
       });
     }
 
     return res.status(503).json({
       error: 'No se pudo conectar con el servicio de IA o la clave GEMINI_API_KEY no está configurada.',
-      suggestion: 'Puedes probar cualquiera de los 8 ejemplos de prueba canónicos preinstalados o verificar tus credenciales.',
+      suggestion: 'Puedes probar cualquiera de los 8 ejemplos de prueba canónicos preinstalados.',
     });
   } catch (error: any) {
     console.error('Translation error:', error);

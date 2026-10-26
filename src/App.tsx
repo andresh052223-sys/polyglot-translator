@@ -13,6 +13,7 @@ import {
   SUPPORTED_LANGUAGES,
 } from './types/translator';
 import { CANONICAL_EXAMPLES, getCanonicalResults } from './data/canonicalExamples';
+import { clientFallbackTranslate } from './services/clientFallbackTranslator';
 import { Header } from './components/Header';
 import { GrammarLegend } from './components/GrammarLegend';
 import { InputPanel } from './components/InputPanel';
@@ -210,36 +211,33 @@ export default function App() {
         throw new Error('La respuesta del servidor no contiene resultados válidos.');
       }
     } catch (err: any) {
-      console.error('Translation execution error:', err);
+      console.warn('Backend translation failed or returned 404, utilizing client translation engine:', err);
 
-      // Resilient local match for canonical examples with full normalization
-      const cleanNorm = (str: string) =>
-        str
-          .toLowerCase()
-          .trim()
-          .replace(/[¿?¡!.,;:«»"'()[\]{}。、！？]/g, '')
-          .normalize('NFD')
-          .replace(/[\u0300-\u036f]/g, '')
-          .replace(/\s+/g, ' ');
+      try {
+        const fallbackResults = clientFallbackTranslate(textToTranslate, sourceLanguageKey);
+        if (fallbackResults && fallbackResults.length > 0) {
+          setResults(fallbackResults);
+          setError(null);
 
-      const normText = cleanNorm(textToTranslate);
+          const newSession: TranslationSession = {
+            id: `session-${Date.now()}`,
+            sourceText: textToTranslate,
+            sourceLanguageKey,
+            sourceLanguageName: currentSourceConfig.name,
+            timestamp: Date.now(),
+            results: fallbackResults,
+          };
 
-      const localMatch = CANONICAL_EXAMPLES.find((ex) => {
-        if (cleanNorm(ex.spanish) === normText || cleanNorm(ex.englishPrompt) === normText) {
-          return true;
+          setSessions((prev) => [newSession, ...prev.filter((s) => s.sourceText !== textToTranslate)].slice(0, 30));
+          return;
         }
-        return ex.results.some((r) => cleanNorm(r.fullTranslation) === normText);
-      });
-
-      if (localMatch) {
-        setResults(getCanonicalResults(localMatch, sourceLanguageKey));
-        setError(null);
-      } else {
-        setError(
-          err.message ||
-            'No se pudo conectar con el servicio de traducción. Verifica tu conexión o intenta con uno de los ejemplos preconfigurados.'
-        );
+      } catch (fallbackErr) {
+        console.error('Client fallback translation failed:', fallbackErr);
       }
+
+      setError(
+        'No se pudo conectar con el servicio de traducción. Por favor intenta con una frase descriptiva o uno de los ejemplos preconfigurados.'
+      );
     } finally {
       setIsLoading(false);
     }
