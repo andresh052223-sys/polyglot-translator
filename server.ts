@@ -20,7 +20,15 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const port = parseInt(process.env.PORT || '3000', 10);
+
+function getPort(): number {
+  const portArgIdx = process.argv.indexOf('--port');
+  if (portArgIdx !== -1 && process.argv[portArgIdx + 1]) {
+    return parseInt(process.argv[portArgIdx + 1], 10);
+  }
+  return 3000;
+}
+const port = getPort();
 
 app.use(express.json());
 
@@ -134,32 +142,40 @@ Responde ÚNICAMENTE un JSON con este formato exacto:
   "confidence": "high" | "medium" | "low"
 }`;
 
-        const timeoutPromise = new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('Detect timeout')), 5000)
-        );
+        const candidateDetectModels = ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'];
+        for (const modelName of candidateDetectModels) {
+          try {
+            const timeoutPromise = new Promise((_, reject) =>
+              setTimeout(() => reject(new Error('Detect timeout')), 8000)
+            );
 
-        const generatePromise = ai.models.generateContent({
-          model: 'gemini-3.1-flash-lite',
-          contents: detectPrompt,
-          config: {
-            responseMimeType: 'application/json',
-            temperature: 0,
-          },
-        });
-
-        const response: any = await Promise.race([generatePromise, timeoutPromise]);
-
-        const parsed = JSON.parse(response.text || '{}');
-        if (parsed.detectedKey && parsed.detectedKey !== 'ambiguous') {
-          const langConfig = SUPPORTED_LANGUAGES.find((l) => l.key === parsed.detectedKey);
-          if (langConfig) {
-            return res.json({
-              detectedKey: langConfig.key,
-              languageName: langConfig.name,
-              flag: langConfig.flag,
-              confidence: parsed.confidence || 'high',
-              isAmbiguous: false,
+            const generatePromise = ai.models.generateContent({
+              model: modelName,
+              contents: detectPrompt,
+              config: {
+                responseMimeType: 'application/json',
+                temperature: 0,
+                thinkingConfig: { thinkingBudget: 0 },
+              },
             });
+
+            const response: any = await Promise.race([generatePromise, timeoutPromise]);
+
+            const parsed = JSON.parse(response.text || '{}');
+            if (parsed.detectedKey && parsed.detectedKey !== 'ambiguous') {
+              const langConfig = SUPPORTED_LANGUAGES.find((l) => l.key === parsed.detectedKey);
+              if (langConfig) {
+                return res.json({
+                  detectedKey: langConfig.key,
+                  languageName: langConfig.name,
+                  flag: langConfig.flag,
+                  confidence: parsed.confidence || 'high',
+                  isAmbiguous: false,
+                });
+              }
+            }
+          } catch (geminiErr) {
+            console.warn(`Detection with ${modelName} failed, trying next:`, geminiErr);
           }
         }
       } catch (geminiErr) {
@@ -280,13 +296,19 @@ Estructura JSON compacta requerida:
 }
 Nota: "phoneticTranscription" solo para "zh" (Hanyu Pinyin con marcas tonales) y "ja" (Hepburn Rōmaji). Para los demás pon null.`;
 
-      const candidateModels = ['gemini-3.1-flash-lite', 'gemini-3.8-flash', 'gemini-flash-latest'];
+      const candidateModels = [
+        'gemini-3.5-flash',
+        'gemini-3.5-flash-lite',
+        'gemini-3.1-flash-lite',
+        'gemini-3.8-flash',
+        'gemini-flash-latest',
+      ];
       let lastModelError: any = null;
 
       for (const modelName of candidateModels) {
         try {
           const timeoutPromise = new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('Timeout de consulta al modelo')), 18000)
+            setTimeout(() => reject(new Error('Timeout de consulta al modelo')), 45000)
           );
 
           const generatePromise = ai.models.generateContent({
@@ -295,6 +317,7 @@ Nota: "phoneticTranscription" solo para "zh" (Hanyu Pinyin con marcas tonales) y
             config: {
               responseMimeType: 'application/json',
               temperature: 0.1,
+              thinkingConfig: { thinkingBudget: 0 },
             },
           });
 
